@@ -123,12 +123,6 @@ python kaggle/train_kaggle.py --policy-size 3b --qlora --task filter_aggregate \
 The notebook expects the repo uploaded as a Kaggle Dataset; cell 3 locates
 `/kaggle/input/**/tablegpt_r1` automatically.
 
-## Development process
-
-This repository was built with a spec → plan → subagent-execution → review
-workflow. Design specs and implementation plans live in
-`docs/superpowers/specs/` and `docs/superpowers/plans/`.
-
 ## Project structure
 
 ```
@@ -145,7 +139,6 @@ tablegpt_r1/
 │   ├── agent/              # special-token parser, inference loop
 │   └── evaluation/         # metrics, benchmark registry, tabular_eval, stats
 ├── kaggle/                 # train_kaggle.py + tablegpt_r1_demo.ipynb
-├── docs/superpowers/       # design specs + implementation plans
 ├── tests/                  # pytest suite
 └── examples/               # quickstart + sample table
 ```
@@ -174,7 +167,7 @@ tablegpt_r1/
 
 The source paper renders several equations as images (not captured as text) and
 omits some training hyperparameters. These are implemented as configurable
-defaults and documented in `paper_workspace/01_algorithm_extraction.yaml`:
+defaults (all overridable in `config.py`):
 
 - **Exact RL objective** — reconstructed from prose + cited GRPO/DAPO/GSPO.
 - **Asymmetric clip bounds** — `eps_low=0.2`, `eps_high=0.28` (DAPO-style).
@@ -195,9 +188,3 @@ Table 2/3 reference targets. Wire dataset loaders in
 
 Reference targets (TableGPT-R1-8B): Internal Table Info 80.00 / Table Path 82.70;
 Spider 86.73; BIRD 63.17; HumanEval 95.73; GSM8K 95.60; MATH 93.30; AIME 50.00.
-
-## Artifacts
-
-Phase 0–3 analysis lives in `../paper_workspace/`:
-`reference_search.yaml`, `01_algorithm_extraction.yaml`, `02_concept_analysis.yaml`,
-`03_implementation_plan.yaml`.
