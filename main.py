@@ -200,7 +200,7 @@ def cmd_eval_tabular(args, cfg: Config):
         compare, evaluate_items, format_report, hf_policy_fn, write_report,
     )
 
-    items = make_items(args.n, seed=args.seed, id_prefix="eval")
+    items = make_items(args.n, seed=args.seed, id_prefix="eval", task=args.task)
 
     if args.mock:
         base = evaluate_items(items, lambda it: "<answer>-1</answer>")
@@ -270,6 +270,8 @@ def build_parser() -> argparse.ArgumentParser:
             et.add_argument("--json", default=None, help="write the report to this path")
             et.add_argument("--mock", action="store_true", default=False,
                             help="run without a model (plumbing smoke test)")
+            et.add_argument("--task", choices=["simple", "filter_aggregate"],
+                            default="simple", help="synthetic task variant")
         else:
             sub.add_parser(name, help=help_text)
     return p

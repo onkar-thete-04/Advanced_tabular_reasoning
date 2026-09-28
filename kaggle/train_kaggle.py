@@ -54,6 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--group-size", type=int, default=8)
     p.add_argument("--prompts-per-step", type=int, default=1)
     p.add_argument("--max-new-tokens", type=int, default=64)
+    p.add_argument("--task", choices=["simple", "filter_aggregate"], default="simple")
     p.add_argument("--n-train", type=int, default=512)
     p.add_argument("--n-eval", type=int, default=32)
     p.add_argument("--seed", type=int, default=42)
@@ -134,10 +135,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[precision] 4-bit compute + mixed precision = {amp} "
               f"(Turing/T4 -> fp16, Ampere+ -> bf16)")
 
-    train_items = make_items(args.n_train, seed=args.seed, id_prefix="train")
+    train_items = make_items(
+        args.n_train, seed=args.seed, id_prefix="train", task=args.task
+    )
     eval_items = make_items(
         args.n_eval, seed=args.seed + 10_000, id_prefix="eval",
-        exclude={it.signature for it in train_items},
+        exclude={it.signature for it in train_items}, task=args.task,
     )
     print(f"[data] train={len(train_items)} eval={len(eval_items)} "
           f"(disjoint signatures)")

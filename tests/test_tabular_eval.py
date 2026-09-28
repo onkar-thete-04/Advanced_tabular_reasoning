@@ -60,3 +60,12 @@ def test_main_eval_tabular_mock(capsys):
     rc = main(["eval-tabular", "--mock", "--n", "8"])
     assert rc == 0
     assert "accuracy" in capsys.readouterr().out
+
+
+def test_main_eval_tabular_mock_hard_task(capsys):
+    from main import main
+
+    rc = main(["eval-tabular", "--mock", "--n", "8", "--task", "filter_aggregate"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "accuracy" in out
