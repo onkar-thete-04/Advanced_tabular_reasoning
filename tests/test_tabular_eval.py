@@ -69,3 +69,77 @@ def test_main_eval_tabular_mock_hard_task(capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "accuracy" in out
+
+
+def test_evaluate_arm_metrics():
+    from src.evaluation.tabular_eval import evaluate_arm
+
+    items = make_items(4, seed=2, id_prefix="eval")
+    m = evaluate_arm(items, lambda it: f"<answer>{it.reference}</answer>")
+    assert m["n"] == 4
+    assert m["accuracy"] == 1.0
+    assert m["format_rate"] == 1.0
+    assert m["mae"] == 0.0
+    assert m["rmse"] == 0.0
+    assert m["numeric_parse_rate"] == 1.0
+    assert set(m["per_op_accuracy"]) <= {"sum", "count", "max", "min"}
+    lo, hi = m["accuracy_ci"]
+    assert 0.0 <= lo <= hi <= 1.0
+
+
+def test_evaluate_arm_mae_on_wrong_answers():
+    from src.evaluation.tabular_eval import evaluate_arm
+
+    items = make_items(4, seed=2, id_prefix="eval")
+    m = evaluate_arm(items, lambda it: f"<answer>{int(it.reference) + 3}</answer>")
+    assert m["accuracy"] == 0.0
+    assert m["format_rate"] == 1.0
+    assert m["mae"] == pytest.approx(3.0)
+    assert m["rmse"] == pytest.approx(3.0)
+
+
+def test_evaluate_arm_pass_at_k():
+    from src.evaluation.tabular_eval import evaluate_arm
+
+    items = make_items(4, seed=2, id_prefix="eval")
+    m0 = evaluate_arm(
+        items, lambda it: "<answer>999999</answer>", pass_k=8,
+        sample_fn=lambda it, k: ["<answer>999999</answer>"] * k,
+    )
+    assert m0["pass_at_k"] == 0.0
+    assert m0["pass_at_1"] == 0.0
+    assert m0["pass_k"] == 8
+
+    m1 = evaluate_arm(
+        items, lambda it: "<answer>999999</answer>", pass_k=8,
+        sample_fn=lambda it, k: [f"<answer>{it.reference}</answer>"] * k,
+    )
+    assert m1["pass_at_k"] == 1.0
+    assert m1["pass_at_1"] == 1.0
+
+
+def test_evaluate_arm_omits_pass_metrics_when_off():
+    from src.evaluation.tabular_eval import evaluate_arm
+
+    items = make_items(3, seed=2, id_prefix="eval")
+    m = evaluate_arm(items, lambda it: f"<answer>{it.reference}</answer>")
+    assert "pass_at_k" not in m
+
+
+def test_format_benchmark():
+    from src.evaluation.tabular_eval import format_benchmark
+
+    result = {
+        "task": "simple",
+        "n": 4,
+        "arms": {
+            "base": {"accuracy": 0.0, "format_rate": 0.0, "mae": 0.0, "rmse": 0.0,
+                     "numeric_parse_rate": 0.0, "per_op_accuracy": {},
+                     "accuracy_ci": (0.0, 0.0), "format_ci": (0.0, 0.0)},
+            "sft+rl": {"accuracy": 1.0, "format_rate": 1.0, "mae": 0.0, "rmse": 0.0,
+                       "numeric_parse_rate": 1.0, "per_op_accuracy": {},
+                       "accuracy_ci": (0.0, 1.0), "format_ci": (0.0, 1.0)},
+        },
+    }
+    text = format_benchmark(result)
+    assert "base" in text and "sft+rl" in text and "accuracy" in text
