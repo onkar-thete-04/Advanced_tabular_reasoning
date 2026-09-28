@@ -19,6 +19,7 @@ import csv
 import json
 import os
 import sys
+import time
 from typing import List, Optional
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -108,6 +109,21 @@ def _maybe_plot(out_dir: str, history: List[dict]) -> Optional[str]:
     return path
 
 
+def _adapter_mb(path: str) -> float:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            total += os.path.getsize(os.path.join(root, name))
+    return round(total / 1e6, 3)
+
+
+def write_run_info(out_dir: str, info: dict) -> str:
+    path = os.path.join(out_dir, "run_info.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2)
+    return path
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     os.makedirs(args.out, exist_ok=True)
@@ -160,7 +176,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     trainer = RLTrainer(policy, reward_fn=make_reward_fn(cfg.reward), config=cfg.rl)
     sft = SFTWarmup(cfg.training)
 
+    timing = {"sft_seconds": 0.0, "rl_seconds": 0.0}
+
     def sft_fn() -> None:
+        started = time.perf_counter()
         print(f"[sft] warm-up on {min(args.sft_samples, len(train_items))} examples "
               f"x {args.sft_epochs} epoch(s)")
         sft.train(
@@ -170,6 +189,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             quant=qcfg,
             output_dir=os.path.join(args.out, "sft_adapter"),
         )
+        timing["sft_seconds"] = time.perf_counter() - started
 
     history: List[dict] = []
 
@@ -183,11 +203,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"entropy={metrics.get('mean_entropy', 0.0):.3f}"
         )
 
+    started_all = time.perf_counter()
     run_sft_then_rl(
         trainer, train_items, item_prompt, item_meta,
         rl_steps=args.rl_steps, prompts_per_step=args.prompts_per_step,
         sft_fn=sft_fn if args.sft else None, on_step=on_step,
     )
+    timing["rl_seconds"] = max(0.0, time.perf_counter() - started_all - timing["sft_seconds"])
 
     _write_metrics(args.out, history)
     if args.plot:
@@ -197,6 +219,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         adapter_dir = os.path.join(args.out, "rl_adapter")
         policy.model.save_pretrained(adapter_dir)
         print(f"[save] adapter -> {adapter_dir}")
+
+    trainable = trainable_count()
+    info = {
+        "model": model_id,
+        "task": args.task,
+        "qlora": args.qlora,
+        "sft_seconds": round(timing["sft_seconds"], 2),
+        "rl_seconds": round(timing["rl_seconds"], 2),
+        "trainable_params": trainable,
+        "trainable_pct": round(100.0 * trainable / max(1, total), 4),
+        "sft_adapter_mb": _adapter_mb(os.path.join(args.out, "sft_adapter")),
+        "rl_adapter_mb": _adapter_mb(os.path.join(args.out, "rl_adapter")),
+        "n_train": len(train_items),
+        "n_eval": len(eval_items),
+        "sft_samples": args.sft_samples,
+        "sft_epochs": args.sft_epochs,
+        "rl_steps": args.rl_steps,
+        "group_size": args.group_size,
+    }
+    print(f"[save] run_info -> {write_run_info(args.out, info)}")
 
     print(f"[done] {len(history)} RL steps. Artifacts in {args.out}")
     return 0
