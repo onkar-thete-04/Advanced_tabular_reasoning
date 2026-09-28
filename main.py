@@ -194,19 +194,57 @@ def cmd_eval(args, cfg: Config):
     print("Internal benchmark (mock policy):", json.dumps(metrics))
 
 
+def _load_run_info(adapter_path):
+    import json
+    import os
+
+    if not adapter_path:
+        return None
+    path = os.path.join(os.path.dirname(os.path.abspath(adapter_path)), "run_info.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def cmd_eval_tabular(args, cfg: Config):
+    import time
+
     from src.data.synthetic_tabular import make_items
     from src.evaluation.tabular_eval import (
-        compare, evaluate_items, format_report, hf_policy_fn, write_report,
+        GenMeter, evaluate_arm, format_benchmark, hf_policy_fn, hf_sample_fn,
+        write_report,
     )
 
     items = make_items(args.n, seed=args.seed, id_prefix="eval", task=args.task)
 
     if args.mock:
-        base = evaluate_items(items, lambda it: "<answer>-1</answer>")
-        trained = evaluate_items(items, lambda it: f"<answer>{it.reference}</answer>")
-        result = compare(base, trained)
-        result["mock"] = True
+        counter = {"i": 0}
+
+        def fake_half(it):
+            counter["i"] += 1
+            ref = it.reference if counter["i"] % 2 == 0 else "-1"
+            return f"<answer>{ref}</answer>"
+
+        def with_samples(inner):
+            if args.pass_k <= 0:
+                return None
+            return lambda it, k: [inner(it)] * int(k)
+
+        arms = {
+            "base": evaluate_arm(items, lambda it: "<answer>-1</answer>",
+                                 args.pass_k, with_samples(lambda it: "<answer>-1</answer>")),
+            "sft": evaluate_arm(items, fake_half, args.pass_k, with_samples(fake_half)),
+            "sft+rl": evaluate_arm(items, lambda it: f"<answer>{it.reference}</answer>",
+                                   args.pass_k,
+                                   with_samples(lambda it: f"<answer>{it.reference}</answer>")),
+        }
+        for arm in arms.values():
+            arm.setdefault("gen_seconds", 0.0)
+            arm.setdefault("tokens_per_sec", 0.0)
+            arm.setdefault("peak_vram_mb", None)
+        result = {"task": args.task, "n": len(items), "pass_k": args.pass_k,
+                  "mock": True, "model": None, "arms": arms, "training": None}
     else:
         from config import QuantConfig
         from src.rl.trainer import HFPolicy
@@ -216,15 +254,43 @@ def cmd_eval_tabular(args, cfg: Config):
         policy = HFPolicy(
             model_id, device=args.device, quant=QuantConfig(enabled=args.qlora)
         )
-        policy_fn = hf_policy_fn(policy, args.max_new_tokens)
-        base = evaluate_items(items, policy_fn)
-        if args.adapter:
-            load_adapter(policy.model, args.adapter)
-        trained = evaluate_items(items, policy_fn)
-        result = compare(base, trained)
-        result["adapter"] = args.adapter
+        meter = GenMeter()
+        policy_fn = hf_policy_fn(policy, args.max_new_tokens, meter=meter)
+        sample_fn = (
+            hf_sample_fn(policy, args.max_new_tokens,
+                         temperature=args.sample_temperature, meter=meter)
+            if args.pass_k > 0 else None
+        )
 
-    print(format_report(result))
+        def run_arm():
+            import torch
+
+            meter.reset()
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+            started = time.perf_counter()
+            metrics = evaluate_arm(items, policy_fn, pass_k=args.pass_k, sample_fn=sample_fn)
+            metrics["gen_seconds"] = time.perf_counter() - started
+            metrics["tokens_per_sec"] = meter.tokens_per_sec
+            metrics["peak_vram_mb"] = (
+                torch.cuda.max_memory_allocated() / 1e6 if torch.cuda.is_available() else None
+            )
+            return metrics
+
+        arms = {"base": run_arm()}
+        if args.sft_adapter:
+            load_adapter(policy.model, args.sft_adapter, adapter_name="sft")
+            arms["sft"] = run_arm()
+        if args.adapter:
+            load_adapter(policy.model, args.adapter, adapter_name="rl")
+            arms["sft+rl"] = run_arm()
+        result = {
+            "task": args.task, "n": len(items), "pass_k": args.pass_k,
+            "model": model_id, "arms": arms,
+            "training": _load_run_info(args.adapter or args.sft_adapter),
+        }
+
+    print(format_benchmark(result))
     if args.json:
         write_report(args.json, result)
         print(f"wrote {args.json}")
@@ -266,6 +332,11 @@ def build_parser() -> argparse.ArgumentParser:
             et.add_argument("--n", type=int, default=32, help="held-out items")
             et.add_argument("--seed", type=int, default=123)
             et.add_argument("--max-new-tokens", type=int, default=64)
+            et.add_argument("--sft-adapter", default=None,
+                            help="path to the SFT-only LoRA adapter (adds the sft arm)")
+            et.add_argument("--pass-k", type=int, default=0,
+                            help="samples per item for pass@k (0 = off)")
+            et.add_argument("--sample-temperature", type=float, default=0.8)
             et.add_argument("--device", default=None)
             et.add_argument("--json", default=None, help="write the report to this path")
             et.add_argument("--mock", action="store_true", default=False,

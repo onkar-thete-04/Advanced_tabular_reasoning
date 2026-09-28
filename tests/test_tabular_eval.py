@@ -143,3 +143,27 @@ def test_format_benchmark():
     }
     text = format_benchmark(result)
     assert "base" in text and "sft+rl" in text and "accuracy" in text
+
+
+def test_main_eval_tabular_mock_three_arms(capsys):
+    from main import main
+
+    rc = main(["eval-tabular", "--mock", "--n", "8", "--task", "filter_aggregate",
+               "--pass-k", "8"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "base" in out and "sft" in out and "sft+rl" in out
+    assert "pass_at_k" in out
+
+
+def test_main_eval_tabular_mock_writes_json(tmp_path, capsys):
+    import json as _json
+    from main import main
+
+    out = tmp_path / "eval.json"
+    rc = main(["eval-tabular", "--mock", "--n", "6", "--pass-k", "8",
+               "--json", str(out)])
+    assert rc == 0
+    data = _json.loads(out.read_text(encoding="utf-8"))
+    assert set(data["arms"]) == {"base", "sft", "sft+rl"}
+    assert data["arms"]["sft+rl"]["accuracy"] == 1.0
