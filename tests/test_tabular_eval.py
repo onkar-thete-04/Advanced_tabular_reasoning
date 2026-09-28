@@ -167,3 +167,10 @@ def test_main_eval_tabular_mock_writes_json(tmp_path, capsys):
     data = _json.loads(out.read_text(encoding="utf-8"))
     assert set(data["arms"]) == {"base", "sft", "sft+rl"}
     assert data["arms"]["sft+rl"]["accuracy"] == 1.0
+
+
+def test_load_run_info_malformed_json_returns_none(tmp_path):
+    from main import _load_run_info
+
+    (tmp_path / "run_info.json").write_text("{not valid json", encoding="utf-8")
+    assert _load_run_info(str(tmp_path / "rl_adapter")) is None

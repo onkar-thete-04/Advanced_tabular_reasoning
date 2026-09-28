@@ -203,8 +203,11 @@ def _load_run_info(adapter_path):
     path = os.path.join(os.path.dirname(os.path.abspath(adapter_path)), "run_info.json")
     if not os.path.exists(path):
         return None
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 def cmd_eval_tabular(args, cfg: Config):
@@ -244,7 +247,8 @@ def cmd_eval_tabular(args, cfg: Config):
             arm.setdefault("tokens_per_sec", 0.0)
             arm.setdefault("peak_vram_mb", None)
         result = {"task": args.task, "n": len(items), "pass_k": args.pass_k,
-                  "mock": True, "model": None, "arms": arms, "training": None}
+                  "mock": True, "model": None, "arms": arms, "training": None,
+                  "temperature": args.sample_temperature, "seed": args.seed}
     else:
         from config import QuantConfig
         from src.rl.trainer import HFPolicy
@@ -265,6 +269,8 @@ def cmd_eval_tabular(args, cfg: Config):
         def run_arm():
             import torch
 
+            if hasattr(policy.model, "eval"):
+                policy.model.eval()
             meter.reset()
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
@@ -280,14 +286,19 @@ def cmd_eval_tabular(args, cfg: Config):
         arms = {"base": run_arm()}
         if args.sft_adapter:
             load_adapter(policy.model, args.sft_adapter, adapter_name="sft")
+            if hasattr(policy.model, "eval"):
+                policy.model.eval()
             arms["sft"] = run_arm()
         if args.adapter:
             load_adapter(policy.model, args.adapter, adapter_name="rl")
+            if hasattr(policy.model, "eval"):
+                policy.model.eval()
             arms["sft+rl"] = run_arm()
         result = {
             "task": args.task, "n": len(items), "pass_k": args.pass_k,
             "model": model_id, "arms": arms,
             "training": _load_run_info(args.adapter or args.sft_adapter),
+            "temperature": args.sample_temperature, "seed": args.seed,
         }
 
     print(format_benchmark(result))

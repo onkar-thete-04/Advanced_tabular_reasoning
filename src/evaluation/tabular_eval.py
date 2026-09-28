@@ -199,7 +199,8 @@ def format_benchmark(result: Dict[str, object]) -> str:
     """Render the multi-arm benchmark result as a text table."""
     arms: Dict[str, dict] = result["arms"]
     names = list(arms)
-    base = names[0]
+    base = "base" if "base" in arms else names[0]
+    final = "sft+rl" if "sft+rl" in arms else names[-1]
     rows = ["accuracy", "format_rate"]
     if "pass_at_k" in arms[base]:
         rows += ["pass_at_k", "pass_at_1"]
@@ -212,7 +213,7 @@ def format_benchmark(result: Dict[str, object]) -> str:
     ]
     for r in rows:
         cells = "".join(f"{float(arms[nm].get(r, 0.0)):>12.3f}" for nm in names)
-        delta = float(arms[names[-1]].get(r, 0.0)) - float(arms[base].get(r, 0.0))
+        delta = float(arms[final].get(r, 0.0)) - float(arms[base].get(r, 0.0))
         lines.append(f"{r:<18}{cells}{delta:>+12.3f}")
 
     lines.append(
