@@ -24,6 +24,8 @@ from src.data.schema import Sample, Step, Trajectory
 from src.rewards.router import RewardRouter
 
 OPS = ("sum", "count", "max", "min")
+AGG_OPS = OPS + ("avg",)
+FILTER_OPS = (">", "<", ">=", "<=", "==", "!=")
 COLUMNS = ("a", "b", "c")
 
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
@@ -39,10 +41,18 @@ class TabularItem:
     op: str
     values: List[int]
     reference: str
+    task: str = "simple"
+    filter_col: Optional[str] = None
+    filter_op: Optional[str] = None
+    filter_threshold: Optional[int] = None
+    passing_values: Optional[List[int]] = None
 
     @property
     def signature(self) -> str:
-        return f"{self.op}:{self.column}:{','.join(map(str, self.values))}"
+        base = f"{self.task}:{self.op}:{self.column}:{','.join(map(str, self.values))}"
+        if self.filter_col is not None:
+            base += f"|{self.filter_col}{self.filter_op}{self.filter_threshold}"
+        return base
 
 
 def _compute(op: str, values: Sequence[int]) -> int:
@@ -54,7 +64,45 @@ def _compute(op: str, values: Sequence[int]) -> int:
         return int(max(values))
     if op == "min":
         return int(min(values))
+    if op == "avg":
+        if not values:
+            raise ValueError("avg of an empty sequence")
+        total = int(sum(values))
+        if total % len(values):
+            raise ValueError("avg is not an integer")
+        return total // len(values)
     raise ValueError(f"unknown op: {op!r}")
+
+
+def _passes(value: int, op: str, threshold: int) -> bool:
+    if op == ">":
+        return value > threshold
+    if op == "<":
+        return value < threshold
+    if op == ">=":
+        return value >= threshold
+    if op == "<=":
+        return value <= threshold
+    if op == "==":
+        return value == threshold
+    if op == "!=":
+        return value != threshold
+    raise ValueError(f"unknown filter op: {op!r}")
+
+
+def _choose_threshold(rng: random.Random, values: Sequence[int], op: str) -> Optional[int]:
+    """Pick a threshold with 1 <= passing <= len(values)-1, or None."""
+    n = len(values)
+    cands = []
+    if op in (">", "<", ">=", "<="):
+        for t in range(min(values) - 1, max(values) + 1):
+            if 1 <= sum(1 for v in values if _passes(v, op, t)) <= n - 1:
+                cands.append(t)
+    else:  # "==" or "!=": threshold must be an existing value
+        for t in sorted(set(values)):
+            if 1 <= sum(1 for v in values if _passes(v, op, t)) <= n - 1:
+                cands.append(t)
+    return rng.choice(cands) if cands else None
 
 
 def _make_table(rng: random.Random, n_rows: int, n_cols: int = 3):
@@ -64,41 +112,99 @@ def _make_table(rng: random.Random, n_rows: int, n_cols: int = 3):
     return "\n".join(lines), header, rows
 
 
+def _make_item(
+    rng: random.Random, sample_id: str, exclude: Set[str], task: str
+) -> Optional[TabularItem]:
+    if task == "filter_aggregate":
+        n_rows = rng.randint(5, 8)
+        table_csv, header, rows = _make_table(rng, n_rows)
+        fcol_idx = rng.randrange(len(header))
+        fcol = header[fcol_idx]
+        fcol_vals = [r[fcol_idx] for r in rows]
+        fop = rng.choice(FILTER_OPS)
+        thr = _choose_threshold(rng, fcol_vals, fop)
+        if thr is None:
+            return None
+        agg = rng.choice(AGG_OPS)
+        agg_idx = rng.randrange(len(header))
+        passing = [
+            r[agg_idx] for r in rows if _passes(r[fcol_idx], fop, thr)
+        ]
+        if not (1 <= len(passing) <= n_rows - 1):
+            return None
+        try:
+            ref = _compute(agg, passing)
+        except ValueError:
+            return None
+        agg_col = header[agg_idx]
+        values = [r[agg_idx] for r in rows]
+        sig = (
+            f"filter_aggregate:{agg}:{agg_col}:{','.join(map(str, values))}"
+            f"|{fcol}{fop}{thr}"
+        )
+        if sig in exclude:
+            return None
+        return TabularItem(
+            sample_id=sample_id,
+            question=(
+                f"What is the {agg} of column {agg_col} for rows where "
+                f"column {fcol} {fop} {thr}?"
+            ),
+            table_csv=table_csv,
+            column=agg_col,
+            op=agg,
+            values=values,
+            reference=str(ref),
+            task="filter_aggregate",
+            filter_col=fcol,
+            filter_op=fop,
+            filter_threshold=thr,
+            passing_values=passing,
+        )
+
+    # simple (default): RNG call order preserved from the original generator
+    n_rows = rng.randint(3, 6)
+    table_csv, header, rows = _make_table(rng, n_rows)
+    col_idx = rng.randrange(len(header))
+    column = header[col_idx]
+    values = [r[col_idx] for r in rows]
+    op = rng.choice(OPS)
+    sig = f"simple:{op}:{column}:{','.join(map(str, values))}"
+    if sig in exclude:
+        return None
+    return TabularItem(
+        sample_id=sample_id,
+        question=f"What is the {op} of column {column}?",
+        table_csv=table_csv,
+        column=column,
+        op=op,
+        values=values,
+        reference=str(_compute(op, values)),
+        task="simple",
+    )
+
+
 def make_items(
     n: int,
     seed: int,
     id_prefix: str = "train",
     exclude: Optional[Set[str]] = None,
+    task: str = "simple",
 ) -> List[TabularItem]:
     """Generate ``n`` deterministic items, skipping excluded signatures."""
+    if task not in ("simple", "filter_aggregate"):
+        raise ValueError(f"unknown task: {task!r}")
     rng = random.Random(seed)
     exclude = set(exclude or ())
     items: List[TabularItem] = []
     attempts = 0
-    while len(items) < n and attempts < n * 50:
+    while len(items) < n and attempts < n * 200:
         attempts += 1
-        n_rows = rng.randint(3, 6)
-        table_csv, header, rows = _make_table(rng, n_rows)
-        col_idx = rng.randrange(len(header))
-        column = header[col_idx]
-        values = [r[col_idx] for r in rows]
-        op = rng.choice(OPS)
-        sig = f"{op}:{column}:{','.join(map(str, values))}"
-        if sig in exclude:
+        it = _make_item(rng, f"{id_prefix}-{len(items)}", exclude, task)
+        if it is None:
             continue
-        reference = str(_compute(op, values))
-        items.append(
-            TabularItem(
-                sample_id=f"{id_prefix}-{len(items)}",
-                question=f"What is the {op} of column {column}?",
-                table_csv=table_csv,
-                column=column,
-                op=op,
-                values=values,
-                reference=reference,
-            )
-        )
-        exclude.add(sig)
+        items.append(it)
+        exclude.add(it.signature)
     return items
 
 
@@ -108,7 +214,10 @@ def item_prompt(item: TabularItem) -> str:
 
 
 def item_meta(item: TabularItem) -> dict:
-    return {"sample_id": item.sample_id, "reference": item.reference}
+    meta = {"sample_id": item.sample_id, "reference": item.reference}
+    if item.passing_values is not None:
+        meta["passing_values"] = list(item.passing_values)
+    return meta
 
 
 def items_to_samples(items: Sequence[TabularItem]) -> List[Sample]:

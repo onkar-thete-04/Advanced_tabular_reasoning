@@ -92,3 +92,52 @@ def test_reward_creates_group_variance_for_formatless_policy():
     assert len(set(rewards.tolist())) > 1
     adv = group_advantage(rewards)
     assert float(adv.abs().sum()) > 0.0
+
+
+def test_filter_aggregate_selectivity():
+    items = make_items(40, seed=12, task="filter_aggregate")
+    assert len(items) == 40
+    for it in items:
+        n_rows = len(it.table_csv.splitlines()) - 1
+        assert 1 <= len(it.passing_values) <= n_rows - 1
+
+
+def test_filter_aggregate_reference_is_correct():
+    from src.data.synthetic_tabular import _passes
+
+    for it in make_items(40, seed=11, task="filter_aggregate"):
+        lines = it.table_csv.splitlines()
+        header = lines[0].split(",")
+        rows = [list(map(int, line.split(","))) for line in lines[1:]]
+        fi = header.index(it.filter_col)
+        ai = header.index(it.column)
+        passing = [
+            r[ai] for r in rows if _passes(r[fi], it.filter_op, it.filter_threshold)
+        ]
+        assert passing == it.passing_values
+        assert it.reference == str(_compute(it.op, passing))
+
+
+def test_filter_aggregate_avg_is_integer():
+    avgs = [
+        it for it in make_items(200, seed=13, task="filter_aggregate")
+        if it.op == "avg"
+    ]
+    assert avgs, "generator produced no avg items"
+    for it in avgs:
+        assert sum(it.passing_values) % len(it.passing_values) == 0
+        assert it.reference == str(sum(it.passing_values) // len(it.passing_values))
+
+
+def test_filter_aggregate_deterministic_and_disjoint():
+    a = [(i.signature, i.reference) for i in make_items(30, seed=5, task="filter_aggregate")]
+    b = [(i.signature, i.reference) for i in make_items(30, seed=5, task="filter_aggregate")]
+    assert a == b
+
+    train = make_items(40, seed=1, task="filter_aggregate", id_prefix="train")
+    held = make_items(
+        40, seed=9, task="filter_aggregate", id_prefix="eval",
+        exclude={i.signature for i in train},
+    )
+    assert len(held) == 40
+    assert not ({i.signature for i in train} & {i.signature for i in held})
