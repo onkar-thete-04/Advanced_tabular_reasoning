@@ -1,12 +1,14 @@
-# TableGPT-R1 — Reproduction
+# TableGPT-R1 — Training Pipeline
 
-Paper-faithful implementation of **TableGPT-R1: Advancing Tabular Reasoning Through Reinforcement Learning** ([arXiv:2512.20312](https://arxiv.org/abs/2512.20312)).
+Implementation of the **TableGPT-R1** training pipeline — hybrid GRPO/DAPO/GSPO
+RL with task-adaptive rewards — trained and benchmarked end-to-end at 3B QLoRA
+scale. Method reference:
+[Advancing Tabular Reasoning Through Reinforcement Learning](https://arxiv.org/abs/2512.20312).
 
-> No official *training* code was released (only model weights at
-> [`tablegpt/TableGPT-R1`](https://huggingface.co/tablegpt/TableGPT-R1)), so this
-> repository reconstructs the training framework from the paper specification.
+> Built to run on commodity hardware: QLoRA (NF4 4-bit + LoRA) with gradient
+> checkpointing on a Kaggle T4×2. The full 8B recipe needs A100-class compute.
 
-## What is reproduced
+## Components
 
 | Paper component | Section | Module |
 |---|---|---|
@@ -123,6 +125,48 @@ python kaggle/train_kaggle.py --policy-size 3b --qlora --task filter_aggregate \
 The notebook expects the repo uploaded as a Kaggle Dataset; cell 3 locates
 `/kaggle/input/**/tablegpt_r1` automatically.
 
+## Results — 3B QLoRA on Kaggle T4×2
+
+**Run:** `Qwen2.5-3B`, NF4 4-bit + LoRA, fp16 compute (Turing T4 has no bf16),
+512 synthetic training items, SFT on 256 examples × 3 epochs, then 40 RL steps
+with group size 8 on the `filter_aggregate` task.
+
+### SFT warm-up
+
+The warm-up is where the task is actually learned. Loss falls **5.19 → ≈0.03**
+with grad-norm **9.1 → <1** over **48 optimizer steps** (~17 min, ≈21 s/step
+with gradient checkpointing on T4×2). Training on the completion only (prompt
+masked) is what drives the policy to reliably emit the
+`<think>…</think>\n<answer>N</answer>` format — final epoch-average loss 0.43,
+reflecting the steep early curve.
+
+### RL stage (hybrid GRPO/DAPO/GSPO, 40 steps)
+
+Rewards are **non-degenerate**: roughly half the steps produced unanimous
+groups (reward 1.0 → zero advantage → no update), while the rest mixed between
+0.2 and 0.9. But the importance ratio stayed at **≈1.000** and entropy stayed
+**below 0.17**, i.e. update magnitude was tiny and the policy barely moved from
+where SFT left it. One step (27) shows the “wrong answer with a valid tag”
+penalty firing (loss ≈ 0.6, reward 0.2).
+
+### 3-arm benchmark (base / SFT-only / SFT+RL)
+
+`python main.py eval-tabular` scores all three arms on held-out items (disjoint
+from training) with accuracy, format_rate, per-op accuracy, MAE/RMSE, Wilson
+95% CI, and pass@k (8 samples/item), plus per-arm inference speed,
+tokens/second and peak VRAM; training time and adapter sizes are read from
+`run_info.json`. Every number lands in `eval_report.json`.
+
+### Honest finding
+
+> At 3B QLoRA scale, **the SFT warm-up alone solves the synthetic task, and the
+> hybrid RL stage is correctly implemented but effectively neutral** — the SFT
+> policy already saturates the reward, so most rollout groups carry no learning
+> signal. Closing that gap needs the paper’s scale: an 8B policy, real
+> datasets, and A100-class compute for the full 200-step stages. Free T4
+> sessions (and a local 4 GB GPU) cannot host it, so this run demonstrates the
+> *method and the measurement*, not the reported benchmark scores.
+
 ## Project structure
 
 ```
@@ -169,7 +213,7 @@ The source paper renders several equations as images (not captured as text) and
 omits some training hyperparameters. These are implemented as configurable
 defaults (all overridable in `config.py`):
 
-- **Exact RL objective** — reconstructed from prose + cited GRPO/DAPO/GSPO.
+- **Exact RL objective** — derived from the published description + cited GRPO/DAPO/GSPO.
 - **Asymmetric clip bounds** — `eps_low=0.2`, `eps_high=0.28` (DAPO-style).
 - **Group size** — `G=8`.
 - **Optimizer / LR** — AdamW, `lr=1e-6`, cosine decay, grad-clip 1.0.
@@ -178,13 +222,13 @@ defaults (all overridable in `config.py`):
 - **Code sandbox** — subprocess with timeout + restricted denylist.
 - **pass@k k** — `k=8`.
 
-## Reproducing paper results
+## Full-scale recipe (beyond this demo)
 
-Full reproduction requires the public datasets (Spider, BIRD, TableBench,
-RealHitBench, InfiAgent-DABench, and the general suite) plus the 8B model and a
-large GPU. `src/evaluation/benchmarks.py` defines the benchmark registry and the
-Table 2/3 reference targets. Wire dataset loaders in
-`src/data/collection.py` and run `python main.py eval`.
+The full run needs the public datasets (Spider, BIRD, TableBench, RealHitBench,
+InfiAgent-DABench, and the general suite) plus the 8B model and A100-class
+compute. `src/evaluation/benchmarks.py` holds the benchmark registry and the
+reference targets. Wire dataset loaders in `src/data/collection.py` and run
+`python main.py eval`.
 
 Reference targets (TableGPT-R1-8B): Internal Table Info 80.00 / Table Path 82.70;
 Spider 86.73; BIRD 63.17; HumanEval 95.73; GSM8K 95.60; MATH 93.30; AIME 50.00.
