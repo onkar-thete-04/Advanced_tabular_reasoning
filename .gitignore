@@ -1,0 +1,16 @@
+# virtual environments
+.venv/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# training / eval artifacts
+outputs/
+
+# SDD scratch workspace
+.superpowers/
+
+# notebooks
+.ipynb_checkpoints/
