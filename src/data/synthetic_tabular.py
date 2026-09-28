@@ -30,6 +30,8 @@ COLUMNS = ("a", "b", "c")
 
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL)
 _NUMBER_RE = re.compile(r"-?\d+")
+_THINK_RE = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+_THINK_LIST_RE = re.compile(r"\[([0-9,\s]*)\]")
 
 
 @dataclass
@@ -278,6 +280,27 @@ def extract_number(text: str) -> Optional[str]:
     return nums[0] if nums else None
 
 
+def extract_think_list(text: str) -> Optional[List[int]]:
+    """First bracketed integer list inside a <think> block, else None."""
+    m = _THINK_RE.search(text or "")
+    if not m:
+        return None
+    lm = _THINK_LIST_RE.search(m.group(1))
+    if not lm:
+        return None
+    body = lm.group(1).strip()
+    if not body:
+        return []
+    try:
+        return [int(x.strip()) for x in body.split(",") if x.strip() != ""]
+    except ValueError:
+        return None
+
+
+def _strip_think(text: str) -> str:
+    return _THINK_RE.sub(" ", text or "")
+
+
 def _as_int(value) -> Optional[int]:
     try:
         return int(str(value).strip())
@@ -297,6 +320,7 @@ def make_reward_fn(
     format_bonus: float = 0.2,
     partial_bonus: float = 0.05,
     unformatted_correct_reward: float = 0.5,
+    process_bonus: float = 0.1,
 ):
     """Return ``reward_fn(meta, response) -> float``.
 
@@ -313,6 +337,10 @@ def make_reward_fn(
     a whole group shared one reward, group-normalized advantages collapsed to
     zero, and the RL step produced no gradient at all (verified). Shaping keeps
     the group non-degenerate until the policy learns to emit the tag.
+
+    On the hard task (``meta`` carries ``passing_values``), add ``process_bonus``
+    when the ``<think>`` bracketed list equals that set; the total is capped at
+    1.0.
     """
     router = RewardRouter(config=config)
 
@@ -326,11 +354,21 @@ def make_reward_fn(
                 reference=reference,
                 numeric=True,
             )
-            return float(result.value) if result.value > 0 else float(format_bonus)
-        if _numbers_equal(extract_numbers(response), reference):
-            return float(unformatted_correct_reward)
-        if extract_number(response) is not None:
-            return float(partial_bonus)
-        return 0.0
+            value = float(result.value) if result.value > 0 else float(format_bonus)
+        else:
+            outside = _strip_think(response)
+            if _numbers_equal(extract_numbers(outside), reference):
+                value = float(unformatted_correct_reward)
+            elif extract_number(outside) is not None:
+                value = float(partial_bonus)
+            else:
+                value = 0.0
+
+        gold = meta.get("passing_values")
+        if gold is not None:
+            listed = extract_think_list(response)
+            if listed is not None and set(listed) == {int(v) for v in gold}:
+                value += float(process_bonus)
+        return min(1.0, value)
 
     return reward

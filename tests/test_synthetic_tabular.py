@@ -164,3 +164,42 @@ def test_hard_completion_is_think_then_answer():
     assert example.completion == (
         f"<think>{reasoning_trace(it)}</think>\n<answer>{it.reference}</answer>"
     )
+
+
+def test_extract_think_list():
+    from src.data.synthetic_tabular import extract_think_list
+
+    assert extract_think_list("<think>a>10 -> b=[5,3] (n=2); sum=8</think>") == [5, 3]
+    assert extract_think_list("no think here") is None
+    assert extract_think_list("<think>nothing bracketed</think>") is None
+
+
+def test_process_bonus_lifts_wrong_answer():
+    it = make_items(1, seed=21, task="filter_aggregate")[0]
+    reward = make_reward_fn()
+    meta = item_meta(it)
+    good = ",".join(map(str, it.passing_values))
+    r = reward(meta, f"<think>y=[{good}]</think><answer>999999</answer>")
+    assert r == pytest.approx(0.3)
+
+
+def test_process_bonus_caps_at_one():
+    it = make_items(1, seed=21, task="filter_aggregate")[0]
+    reward = make_reward_fn()
+    meta = item_meta(it)
+    good = ",".join(map(str, it.passing_values))
+    r = reward(meta, f"<think>y=[{good}]</think><answer>{it.reference}</answer>")
+    assert r == pytest.approx(1.0)
+
+
+def test_fallback_ignores_numbers_inside_think():
+    it = make_items(1, seed=21, task="filter_aggregate")[0]
+    reward = make_reward_fn()
+    meta = item_meta(it)
+    # reference only appears inside the think block; no <answer>, no number outside
+    assert reward(meta, f"<think>sum={it.reference}</think>") == pytest.approx(0.0)
+
+
+def test_simple_task_meta_has_no_passing_values():
+    it = make_items(1, seed=5)[0]
+    assert "passing_values" not in item_meta(it)
