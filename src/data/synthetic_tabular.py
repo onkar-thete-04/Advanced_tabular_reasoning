@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence, Set
 
 from config import RewardConfig
-from src.constants import STEP_ANSWER, TaskType
+from src.constants import STEP_ANSWER, STEP_THINK, TaskType
 from src.data.schema import Sample, Step, Trajectory
 from src.rewards.router import RewardRouter
 
@@ -233,15 +233,29 @@ def items_to_samples(items: Sequence[TabularItem]) -> List[Sample]:
     ]
 
 
+def reasoning_trace(item: TabularItem) -> str:
+    """Compact deterministic reasoning string (the inside of a <think> block)."""
+    vals = ",".join(map(str, item.passing_values or []))
+    return (
+        f"filter {item.filter_col}{item.filter_op}{item.filter_threshold} "
+        f"-> {item.column}=[{vals}] (n={len(item.passing_values or [])}); "
+        f"{item.op}={item.reference}"
+    )
+
+
 def make_trajectory(item: TabularItem) -> Trajectory:
-    """A minimal gold trajectory: just the formatted final answer."""
+    """Gold trajectory: a think step (hard task only) then the final answer."""
+    steps = []
+    if item.task == "filter_aggregate":
+        steps.append(Step(kind=STEP_THINK, content=reasoning_trace(item)))
+    steps.append(Step(kind=STEP_ANSWER, content=item.reference))
     return Trajectory(
         sample_id=item.sample_id,
         question=item.question,
         table_ref=item.table_csv,
         task_type=TaskType.TABLE_QA_WITH_LABEL.value,
         final_answer=item.reference,
-        steps=[Step(kind=STEP_ANSWER, content=item.reference)],
+        steps=steps,
     )
 
 

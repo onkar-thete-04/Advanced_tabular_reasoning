@@ -141,3 +141,26 @@ def test_filter_aggregate_deterministic_and_disjoint():
     )
     assert len(held) == 40
     assert not ({i.signature for i in train} & {i.signature for i in held})
+
+
+def test_reasoning_trace_format():
+    from src.data.synthetic_tabular import reasoning_trace
+
+    it = make_items(1, seed=21, task="filter_aggregate")[0]
+    trace = reasoning_trace(it)
+    assert trace.startswith(
+        f"filter {it.filter_col}{it.filter_op}{it.filter_threshold} ->"
+    )
+    assert f"=[{','.join(map(str, it.passing_values))}]" in trace
+    assert f"(n={len(it.passing_values)})" in trace
+    assert trace.endswith(f"{it.op}={it.reference}")
+
+
+def test_hard_completion_is_think_then_answer():
+    from src.data.synthetic_tabular import reasoning_trace
+
+    it = make_items(1, seed=21, task="filter_aggregate")[0]
+    example = trajectory_to_sft_example(make_trajectories([it])[0])
+    assert example.completion == (
+        f"<think>{reasoning_trace(it)}</think>\n<answer>{it.reference}</answer>"
+    )
