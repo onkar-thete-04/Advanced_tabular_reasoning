@@ -22,8 +22,12 @@ Paper-faithful implementation of **TableGPT-R1: Advancing Tabular Reasoning Thro
 | Process step reward (+0.1 / −0.1 / −0.2) | 3.4.2 | `src/rewards/process_reward.py` |
 | Reward aggregation + policy regularization (incl. `need_plot`) | 3.4.3 | `src/rewards/aggregator.py`, `src/rewards/regularization.py` |
 | Multi-stage training (SFT warm-up + 3 RL stages + pass@k filtering) | 3.5 | `src/training/sft.py`, `src/rl/multistage.py` |
+| QLoRA / LoRA + 4-bit loading + gradient checkpointing | 3.5 | `src/training/quant.py`, `config.py` (`QuantConfig`) |
 | Code execution environment | 3.2.1 | `src/execution/executor.py` |
 | Evaluation metrics + benchmark registry | 4 | `src/evaluation/metrics.py`, `src/evaluation/benchmarks.py` |
+| Synthetic tabular task (`simple` / `filter_aggregate`) + shaped reward | — | `src/data/synthetic_tabular.py` |
+| Tabular before/after eval + 3-arm benchmark (pass@k, CI, MAE/RMSE) | 4 | `src/evaluation/tabular_eval.py`, `src/evaluation/stats.py` |
+| Kaggle demo: QLoRA SFT → RL → benchmark | — | `kaggle/train_kaggle.py`, `kaggle/tablegpt_r1_demo.ipynb` |
 | Inference agent loop | 3.2.1 | `src/agent/loop.py` |
 
 ## Install
@@ -49,8 +53,33 @@ python main.py rewards     # task-adaptive reward demo (routing, process, regula
 python main.py rl-smoke    # verify the hybrid RL objective on hand-computed tensors
 python main.py agent       # closed-loop think-act-observe demo
 python main.py eval        # evaluate a policy over a benchmark (mock policy)
+python main.py eval-tabular --mock   # synthetic tabular eval (no model needed)
 python main.py pipeline    # end-to-end smoke test of all components
 ```
+
+### Synthetic tabular benchmark
+
+`eval-tabular` reports a multi-metric table for up to three arms — `base`,
+`sft`, `sft+rl` — over the offline synthetic tabular task:
+
+```bash
+# plumbing smoke test (deterministic, no model/GPU)
+python main.py eval-tabular --mock --task filter_aggregate --pass-k 8 --n 16
+
+# full benchmark against real adapters (GPU + transformers/peft/bitsandbytes)
+python main.py eval-tabular \
+    --model Qwen/Qwen2.5-3B --qlora --task filter_aggregate \
+    --sft-adapter outputs/kaggle_demo/sft_adapter \
+    --adapter outputs/kaggle_demo/rl_adapter \
+    --n 256 --pass-k 8 --max-new-tokens 128 \
+    --json outputs/eval_report.json
+```
+
+Metrics: accuracy, format_rate, per-op accuracy, MAE/RMSE, Wilson 95% CI, and
+(when `--pass-k > 0`) pass@k / pass@1. Efficiency is captured per arm
+(generation seconds, tokens/s, peak VRAM); training time and adapter sizes are
+read from `run_info.json` next to the adapter. `--task` selects `simple`
+(default) or the harder multi-step `filter_aggregate` variant.
 
 Quickstart script:
 
@@ -64,25 +93,59 @@ python examples/quickstart.py
 pytest tests/ -v
 ```
 
-58 tests cover the data pipeline, reward system, RL objective (including
-hand-computed loss/ratio/clip/entropy checks), execution sandbox, agent loop,
-metrics, and multi-stage orchestration.
+119 tests pass (1 skipped), covering the data pipeline, reward system, RL
+objective (including hand-computed loss/ratio/clip/entropy checks), execution
+sandbox, agent loop, metrics, multi-stage orchestration, QLoRA/quantization
+helpers, SFT label masking, the synthetic tabular task + shaped reward, the
+evaluation statistics, and the Kaggle `run_info.json` writer. All are
+CPU-only; GPU/model paths are lazy-imported and skipped when dependencies are
+absent.
+
+## QLoRA + Kaggle demo
+
+`kaggle/train_kaggle.py` runs the recipe at small policy scale on a free Kaggle
+T4, and `kaggle/tablegpt_r1_demo.ipynb` drives it end to end:
+
+```bash
+python kaggle/train_kaggle.py --policy-size 3b --qlora --task filter_aggregate \
+    --sft-samples 256 --sft-epochs 3 --rl-steps 40 --out outputs/kaggle_demo
+```
+
+- QLoRA (NF4 4-bit base + LoRA adapters) with gradient checkpointing so a 3B
+  model fits the T4's 16 GB. T4 (Turing) has no bf16, so the code auto-selects
+  **fp16** for 4-bit compute + AMP; Ampere+/A100 uses bf16.
+- SFT trains on the **completion only** (prompt masked); RL uses shaped
+  rewards over the synthetic tabular task.
+- Emits `run_info.json` (model, timings, trainable %, adapter sizes) next to
+  the adapters, plus training curves; the notebook's `6b` cell then prints the
+  `base` / `sft` / `sft+rl` benchmark table.
+
+The notebook expects the repo uploaded as a Kaggle Dataset; cell 3 locates
+`/kaggle/input/**/tablegpt_r1` automatically.
+
+## Development process
+
+This repository was built with a spec → plan → subagent-execution → review
+workflow. Design specs and implementation plans live in
+`docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 ## Project structure
 
 ```
 tablegpt_r1/
 ├── main.py                 # CLI entry point
-├── config.py               # all hyperparameters (paper values + [INFERRED] defaults)
+├── config.py               # all hyperparameters (paper values + [INFERRED] defaults, QuantConfig)
 ├── src/
 │   ├── constants.py        # special tokens, task taxonomy, Table 1 routing
-│   ├── data/               # schema, collection, filtering, composition, synthesis, augmentation, labeling
+│   ├── data/               # schema, collection, filtering, composition, synthesis, augmentation, labeling, synthetic_tabular
 │   ├── execution/          # sandboxed Python executor, error formatting
 │   ├── rewards/            # router, rule-based, criteria judge, process reward, regularization, aggregator
 │   ├── rl/                 # advantage, hybrid objective, trainer, multi-stage
-│   ├── training/           # SFT warm-up
+│   ├── training/           # SFT warm-up, QLoRA/quantization helpers
 │   ├── agent/              # special-token parser, inference loop
-│   └── evaluation/         # metrics, benchmark registry
+│   └── evaluation/         # metrics, benchmark registry, tabular_eval, stats
+├── kaggle/                 # train_kaggle.py + tablegpt_r1_demo.ipynb
+├── docs/superpowers/       # design specs + implementation plans
 ├── tests/                  # pytest suite
 └── examples/               # quickstart + sample table
 ```
